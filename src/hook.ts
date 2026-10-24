@@ -9,7 +9,7 @@ export interface StopRequest {
   stop_hook_active: false;
 }
 
-export interface HookRun {
+export interface StopHook {
   /** Resolves with the hook's stdout when it exits 0, or nothing on any failure. */
   readonly stdout: Promise<string | undefined>;
   /** Stops the hook (SIGTERM). Safe to call after it has exited. */
@@ -20,7 +20,7 @@ export interface HookRun {
  * Spawns `<executable> agent-hook stop` without blocking, writes the Stop request to its stdin
  * and collects its stdout. `CLAUDE_PROJECT_DIR` makes the app accept the request as Claude Code.
  */
-export function runStopHook(executable: string, request: StopRequest): HookRun {
+export function runStopHook(executable: string, request: StopRequest): StopHook {
   const { promise, resolve } = Promise.withResolvers<string | undefined>();
   const child = spawn(executable, ["agent-hook", "stop"], {
     env: { ...process.env, CLAUDE_PROJECT_DIR: request.cwd },
@@ -33,6 +33,7 @@ export function runStopHook(executable: string, request: StopRequest): HookRun {
   });
   child.on("error", () => resolve(undefined));
   child.on("close", (code) => resolve(code === 0 ? stdout : undefined));
+  // The hook may exit before reading stdin; a broken pipe must not crash the host.
   child.stdin.on("error", () => {});
   child.stdin.end(JSON.stringify(request));
   return {

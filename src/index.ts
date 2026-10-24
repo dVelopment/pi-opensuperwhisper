@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { locateApp } from "./app.ts";
-import { runStopHook } from "./hook.ts";
+import { runStopHook, type StopHook } from "./hook.ts";
 import { type AssistantMessageLike, extractText, parseReply } from "./message.ts";
 
 export interface ExtensionOptions {
@@ -22,26 +22,56 @@ const DEFAULT_OPTIONS: ExtensionOptions = {
 export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi: ExtensionAPI) => void {
   const options = { ...DEFAULT_OPTIONS, ...overrides };
   return (pi) => {
+    // At most one pending panel request per session. Bumping the generation orphans any reply
+    // still in flight, so typed input racing a panel reply produces exactly one run.
+    let pending: StopHook | undefined;
+    let generation = 0;
+
+    function cancelPending(): void {
+      generation++;
+      pending?.kill();
+      pending = undefined;
+    }
+
     /** Opens the panel for a settled run, unless a guard says the user shouldn't be asked. */
     function requestReply(ctx: ExtensionContext, message: AssistantMessageLike | undefined, sessionId: string): void {
+      cancelPending();
       if (options.platform !== "darwin" || ctx.mode !== "tui") return;
       if (!message || message.stopReason === "aborted" || message.stopReason === "error") return;
       const text = extractText(message);
       if (!text) return;
       const executable = locateApp(options.agentsDir);
       if (!executable) return;
-      const run = runStopHook(executable, {
+      const request = generation;
+      pending = runStopHook(executable, {
         hook_event_name: "Stop",
         session_id: sessionId,
         cwd: ctx.cwd,
         last_assistant_message: text,
         stop_hook_active: false,
       });
-      void run.stdout.then((stdout) => {
+      // Safety net in case the hook outlives the app's own wait (30–590 s).
+      const hardKill = setTimeout(() => {
+        if (request === generation) cancelPending();
+      }, options.hardKillMs);
+      hardKill.unref();
+      void pending.stdout.then((stdout) => {
+        clearTimeout(hardKill);
+        if (request !== generation) return;
+        pending = undefined;
         const reply = stdout && parseReply(stdout);
         if (reply) pi.sendUserMessage(reply);
       });
     }
+
+    // Anything that starts or replaces a run makes the panel's question outdated. Our own
+    // injected reply arrives as "extension" input and must not cancel anything.
+    pi.on("input", (event) => {
+      if (event.source !== "extension") cancelPending();
+    });
+    pi.on("agent_start", cancelPending);
+    pi.on("session_shutdown", cancelPending);
+    pi.on("session_before_switch", cancelPending);
 
     // pi: fires once the run is fully settled (no retry, compaction or queued continuation left).
     pi.on("agent_settled", (event, ctx) => {

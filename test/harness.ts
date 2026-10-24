@@ -12,7 +12,8 @@ export type HookBehavior =
   | { kind: "silent" }
   | { kind: "fail" }
   | { kind: "sleep" }
-  | { kind: "reply-on-term"; text: string };
+  | { kind: "reply-on-term"; text: string }
+  | { kind: "reply-on-release"; text: string };
 
 export interface HookRun {
   pid: number;
@@ -63,8 +64,13 @@ export class FakeApp {
       'mv "$run.tmp" "$run"',
     ];
     writeFileSync(this.stdoutFile, stdoutFor(behavior));
-    writeFileSync(this.executable, [...record, ...actionFor(behavior, this.stdoutFile), ""].join("\n"));
+    writeFileSync(this.executable, [...record, ...actionFor(behavior, this.dir), ""].join("\n"));
     chmodSync(this.executable, executable ? 0o755 : 0o644);
+  }
+
+  /** Lets a `reply-on-release` hook print its reply. */
+  release(): void {
+    writeFileSync(join(this.dir, "release"), "");
   }
 
   runs(): HookRun[] {
@@ -109,6 +115,7 @@ function stdoutFor(behavior: HookBehavior): string {
   switch (behavior.kind) {
     case "reply":
     case "reply-on-term":
+    case "reply-on-release":
       return JSON.stringify({ decision: "block", reason: `${REPLY_PREFIX}${behavior.text}` });
     case "print":
       return behavior.stdout;
@@ -119,7 +126,8 @@ function stdoutFor(behavior: HookBehavior): string {
   }
 }
 
-function actionFor(behavior: HookBehavior, stdoutFile: string): string[] {
+function actionFor(behavior: HookBehavior, dir: string): string[] {
+  const stdoutFile = join(dir, "stdout");
   switch (behavior.kind) {
     case "reply":
     case "print":
@@ -133,6 +141,9 @@ function actionFor(behavior: HookBehavior, stdoutFile: string): string[] {
     case "reply-on-term":
       // Simulates a reply that lands at the same instant the hook is cancelled.
       return [`trap 'kill $! 2>/dev/null; cat "${stdoutFile}"; exit 0' TERM`, "sleep 30 &", "wait"];
+    case "reply-on-release":
+      // Replies only once the test calls `release()`, so the test controls the timing.
+      return [`while [ ! -e "${join(dir, "release")}" ]; do sleep 0.02; done`, `cat "${stdoutFile}"`];
   }
 }
 

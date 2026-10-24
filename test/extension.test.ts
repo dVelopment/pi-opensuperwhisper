@@ -332,3 +332,90 @@ describe("host detection", () => {
     await expectNoSpawn(app, host);
   });
 });
+
+describe("cancellation", () => {
+  async function pendingHook(behavior: HookBehavior = { kind: "sleep" }, options?: Parameters<typeof setup>[1]) {
+    const { app, host } = setup(behavior, options);
+    await settle(host);
+    const [run] = await app.waitForRuns(1);
+    if (!run) throw new Error("hook did not run");
+    return { app, host, run };
+  }
+
+  async function expectKilledWithoutReply(host: FakeHost, pid: number) {
+    await waitFor(() => !isAlive(pid), "the hook to be killed");
+    // The exit has been observed; give the extension's close handler a turn to (wrongly) deliver.
+    await Bun.sleep(50);
+    expect(host.sent).toEqual([]);
+  }
+
+  for (const source of ["interactive", "rpc"]) {
+    test(`${source} input kills the pending hook and lets the input through`, async () => {
+      const { host, run } = await pendingHook();
+      const results = await host.emit("input", { text: "typed instead", source }, piCtx([]));
+      expect(results.every((result) => result === undefined)).toBe(true);
+      await expectKilledWithoutReply(host, run.pid);
+    });
+  }
+
+  test("a reply that lands as the user types is dropped, so exactly one run happens", async () => {
+    const { host, run } = await pendingHook({ kind: "reply-on-term", text: "too late" });
+    await host.emit("input", { text: "typed instead", source: "interactive" }, piCtx([]));
+    await expectKilledWithoutReply(host, run.pid);
+  });
+
+  test("our own injected reply (extension input) does not cancel the pending hook", async () => {
+    const { app, host } = await pendingHook({ kind: "reply-on-release", text: "Still wanted." });
+    await host.emit("input", { text: "from another extension", source: "extension" }, piCtx([]));
+    app.release();
+    await host.waitForSent(1);
+    expect(host.sent.map((call) => call.content)).toEqual(["Still wanted."]);
+  });
+
+  test("a new run (agent_start) kills the pending hook", async () => {
+    const { host, run } = await pendingHook({ kind: "reply-on-term", text: "outdated" });
+    await host.emit("agent_start", {}, piCtx([]));
+    await expectKilledWithoutReply(host, run.pid);
+  });
+
+  test("session shutdown kills the pending hook", async () => {
+    const { host, run } = await pendingHook({ kind: "reply-on-term", text: "orphan" });
+    await host.emit("session_shutdown", { reason: "quit" }, piCtx([]));
+    await expectKilledWithoutReply(host, run.pid);
+  });
+
+  test("switching sessions kills the pending hook without blocking the switch", async () => {
+    const { host, run } = await pendingHook({ kind: "reply-on-term", text: "wrong session" });
+    const results = await host.emit("session_before_switch", { reason: "new" }, piCtx([]));
+    expect(results.every((result) => result === undefined)).toBe(true);
+    await expectKilledWithoutReply(host, run.pid);
+  });
+
+  test("a second settle replaces the pending hook", async () => {
+    const { app, host, run: first } = await pendingHook({ kind: "reply-on-term", text: "from the first panel" });
+
+    await host.emit("agent_settled", { aborted: false }, piCtx([user("And now?"), assistant("Second question?")]));
+
+    const runs = await app.waitForRuns(2);
+    const second = runs.find((run) => run.pid !== first.pid);
+    expect(JSON.parse(second?.stdin ?? "").last_assistant_message).toBe("Second question?");
+    await expectKilledWithoutReply(host, first.pid);
+    expect(isAlive(second?.pid ?? 0)).toBe(true);
+  });
+
+  test("the hard-kill timer stops a hook that outlives the app's own wait", async () => {
+    // Long enough for the fake hook to record its run before the timer fires.
+    const { host, run } = await pendingHook({ kind: "reply-on-term", text: "hung" }, { hardKillMs: 500 });
+    await expectKilledWithoutReply(host, run.pid);
+  });
+
+  test("a delivered reply leaves nothing to cancel", async () => {
+    const { app, host } = setup({ kind: "reply", text: "Go on." });
+    await settle(host);
+    await host.waitForSent(1);
+    await host.emit("input", { text: "Go on.", source: "extension" }, piCtx([]));
+    await host.emit("agent_start", {}, piCtx([]));
+    expect(host.sent.map((call) => call.content)).toEqual(["Go on."]);
+    expect(app.runs()).toHaveLength(1);
+  });
+});
