@@ -184,6 +184,15 @@ describe("hook outcomes", () => {
     expect(host.sent.map((call) => call.content)).toEqual(["Plain reply"]);
   });
 
+  test("a host that rejects the reply does not surface an error and the next settle still asks", async () => {
+    const { app, host } = setup({ kind: "reply", text: "Too late." });
+    host.rejectDelivery = true;
+    await settle(host);
+    await host.waitForSent(1);
+    await settle(host);
+    await app.waitForRuns(2);
+  });
+
   const nothingDelivered: [string, HookBehavior][] = [
     ["prints nothing (dismissed or timed out)", { kind: "silent" }],
     ["prints garbage", { kind: "print", stdout: "not json at all" }],

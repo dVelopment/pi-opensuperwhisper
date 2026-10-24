@@ -60,7 +60,12 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
         if (request !== generation) return;
         pending = undefined;
         const reply = stdout && parseReply(stdout);
-        if (reply) pi.sendUserMessage(reply);
+        if (!reply) return;
+        try {
+          pi.sendUserMessage(reply);
+        } catch {
+          // Fail open: the session went away mid-wait. An unhandled rejection would crash a Node host.
+        }
       });
     }
 

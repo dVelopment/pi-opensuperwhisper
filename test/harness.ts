@@ -189,6 +189,8 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 /** A fake host `ExtensionAPI` that records handlers and `sendUserMessage` calls. */
 export class FakeHost {
   readonly sent: { content: unknown; options: unknown }[] = [];
+  /** When set, `sendUserMessage` throws after recording, like a host whose session went away. */
+  rejectDelivery = false;
   private readonly handlers = new Map<string, Handler[]>();
 
   readonly api = {
@@ -200,6 +202,7 @@ export class FakeHost {
     },
     sendUserMessage: (content: unknown, options?: unknown) => {
       this.sent.push({ content, options });
+      if (this.rejectDelivery) throw new Error("session disposed");
     },
   } as unknown as ExtensionAPI;
 
