@@ -1,6 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createExtension } from "../src/index.ts";
-import { assistant, FakeApp, FakeHost, type HookBehavior, isAlive, NO_SPAWN_GRACE_MS, piCtx, user, waitFor } from "./harness.ts";
+import {
+  assistant,
+  FakeApp,
+  FakeHost,
+  type HookBehavior,
+  isAlive,
+  NO_SPAWN_GRACE_MS,
+  ompCtx,
+  piCtx,
+  user,
+  waitFor,
+} from "./harness.ts";
 
 const apps: FakeApp[] = [];
 const hosts: FakeHost[] = [];
@@ -232,6 +243,92 @@ describe("guards", () => {
   test("does nothing when the branch has no assistant message", async () => {
     const { app, host } = setup({ kind: "reply", text: "unreachable" });
     await host.emit("agent_settled", { aborted: false }, piCtx([user("Hello?")]));
+    await expectNoSpawn(app, host);
+  });
+});
+
+describe("omp: agent_end", () => {
+  const runMessages = [user("Ready?"), assistant("Shall I ship it?")];
+
+  test("an omp-shaped ctx on a terminal agent_end opens the panel and delivers the reply", async () => {
+    const { app, host } = setup({ kind: "reply", text: "Ship it." });
+
+    await host.emit("agent_end", { messages: runMessages }, ompCtx({ cwd: "/Users/me/omp-project" }));
+
+    const [run] = await app.waitForRuns(1);
+    expect(JSON.parse(run?.stdin ?? "")).toEqual({
+      hook_event_name: "Stop",
+      session_id: "omp-session-id",
+      cwd: "/Users/me/omp-project",
+      last_assistant_message: "Shall I ship it?",
+      stop_hook_active: false,
+    });
+    await host.waitForSent(1);
+    expect(host.sent.map((call) => call.content)).toEqual(["Ship it."]);
+  });
+
+  test("does nothing when omp will continue on its own", async () => {
+    const { app, host } = setup();
+    await host.emit("agent_end", { messages: runMessages, willContinue: true }, ompCtx());
+    await expectNoSpawn(app, host);
+  });
+
+  test("does nothing when omp is not idle", async () => {
+    const { app, host } = setup();
+    await host.emit("agent_end", { messages: runMessages }, ompCtx({ idle: false }));
+    await expectNoSpawn(app, host);
+  });
+
+  test("does nothing when omp has pending messages", async () => {
+    const { app, host } = setup();
+    await host.emit("agent_end", { messages: runMessages }, ompCtx({ pendingMessages: true }));
+    await expectNoSpawn(app, host);
+  });
+
+  test("checks idleness after omp has finished handling agent_end", async () => {
+    const { app, host } = setup();
+    const ctx = ompCtx();
+    const ended = host.emit("agent_end", { messages: runMessages }, ctx);
+    // omp queues a follow-up right after emitting the extension agent_end.
+    ctx.hasPendingMessages = () => true;
+    await ended;
+    await expectNoSpawn(app, host);
+  });
+
+  for (const stopReason of ["aborted", "error"]) {
+    test(`does nothing when the run's last assistant message stopped with "${stopReason}"`, async () => {
+      const { app, host } = setup();
+      await host.emit("agent_end", { messages: [user("Go"), assistant("Partial", stopReason)] }, ompCtx());
+      await expectNoSpawn(app, host);
+    });
+  }
+
+  test("does nothing in an omp subagent session", async () => {
+    const { app, host } = setup();
+    await host.emit("agent_end", { messages: runMessages }, ompCtx({ agentKind: "sub" }));
+    await expectNoSpawn(app, host);
+  });
+
+  test("does nothing in omp rpc mode", async () => {
+    const { app, host } = setup();
+    await host.emit("agent_end", { messages: runMessages }, ompCtx({ mode: "rpc" }));
+    await expectNoSpawn(app, host);
+  });
+});
+
+describe("host detection", () => {
+  test("a pi-shaped ctx on agent_end is ignored", async () => {
+    const { app, host } = setup();
+    await host.emit("agent_end", { messages: [user("Ready?"), assistant("Shall I ship it?")] }, piCtx([]));
+    await expectNoSpawn(app, host);
+  });
+
+  test("an omp-shaped ctx on agent_settled is ignored", async () => {
+    const { app, host } = setup();
+    const pi = piCtx([assistant("Shall I ship it?")]);
+    const omp = ompCtx();
+    const ctx = { ...omp, sessionManager: { ...pi.sessionManager, ...omp.sessionManager } };
+    await host.emit("agent_settled", { aborted: false }, ctx);
     await expectNoSpawn(app, host);
   });
 });
