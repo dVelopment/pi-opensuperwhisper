@@ -195,6 +195,11 @@ export class FakeHost {
     return results;
   }
 
+  /** The host events the extension subscribed to. */
+  events(): string[] {
+    return [...this.handlers.keys()];
+  }
+
   async waitForSent(count: number): Promise<void> {
     await waitFor(() => this.sent.length >= count, `${count} sendUserMessage call(s)`);
   }

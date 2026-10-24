@@ -39,6 +39,16 @@ describe("pi: agent_settled", () => {
     await host.waitForSent(1);
     expect(host.sent).toEqual([{ content: "Yes, ship it.", options: undefined }]);
   });
+
+  test("the settle handler returns while the panel is still waiting", async () => {
+    const { app, host } = setup({ kind: "sleep" });
+
+    await host.emit("agent_settled", { aborted: false }, piCtx([assistant("Shall I ship it?")]));
+
+    const [run] = await app.waitForRuns(1);
+    expect(isAlive(run?.pid ?? 0)).toBe(true);
+    expect(host.sent).toEqual([]);
+  });
 });
 
 /** Fires a settle that would open the panel if every other condition holds. */
