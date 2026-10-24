@@ -1,5 +1,5 @@
 {
-  "name": "pi-opensuperwhisper",
+  "name": "@chitinai/pi-opensuperwhisper",
   "version": "0.1.0",
   "description": "Answer pi and oh-my-pi agents from the OpenSuperWhisper panel on macOS",
   "license": "MIT",
@@ -7,6 +7,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dVelopment/pi-opensuperwhisper.git"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "pi-package",

@@ -9,13 +9,13 @@ When a run is finished and waiting for you, OpenSuperWhisper's Agents panel open
 pi:
 
 ```bash
-pi install npm:pi-opensuperwhisper
+pi install npm:@chitinai/pi-opensuperwhisper
 ```
 
 oh-my-pi:
 
 ```bash
-omp plugin install pi-opensuperwhisper
+omp plugin install @chitinai/pi-opensuperwhisper
 ```
 
 There's nothing to configure. Turn the panel on or off in OpenSuperWhisper's own settings.
