@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -23,22 +24,68 @@ export interface HookRun {
 }
 
 /**
+ * The fake `agent-hook`. Every FakeApp links to this one file and the script reads its behaviour
+ * from the link's directory: macOS scans each new executable on first run (~0.5 s), so a fresh
+ * script per test would make spawn timing slow and erratic.
+ */
+const FAKE_HOOK_SCRIPT = `#!/bin/sh
+dir=$(dirname "$0")
+echo $$ >> "$dir/started"
+run="$dir/runs/$$"
+mkdir -p "$run.tmp"
+printf '%s\\n' "$@" > "$run.tmp/argv"
+cat > "$run.tmp/stdin"
+env -0 > "$run.tmp/env"
+mv "$run.tmp" "$run"
+case "$(cat "$dir/behavior")" in
+  print) cat "$dir/stdout" ;;
+  fail) cat "$dir/stdout"; exit 1 ;;
+  sleep) exec sleep 30 ;;
+  # A reply that lands at the same instant the hook is cancelled.
+  reply-on-term) trap 'cat "$dir/stdout"; exit 0' TERM; while :; do sleep 0.05; done ;;
+  # A reply that waits for the test to call release().
+  reply-on-release) while [ ! -e "$dir/release" ]; do sleep 0.02; done; cat "$dir/stdout" ;;
+esac
+exit 0
+`;
+
+let sharedScriptDir: string | undefined;
+
+function fakeHookScript(): string {
+  if (!sharedScriptDir) {
+    sharedScriptDir = mkdtempSync(join(tmpdir(), "pi-osw-hook-"));
+    const script = join(sharedScriptDir, "agent-hook");
+    writeFileSync(script, FAKE_HOOK_SCRIPT, { mode: 0o755 });
+    // Pay the first-run scan now, so no test (or no-spawn grace period) has to absorb it.
+    Bun.spawnSync([script], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  }
+  return join(sharedScriptDir, "agent-hook");
+}
+
+afterAll(() => {
+  if (sharedScriptDir) rmSync(sharedScriptDir, { recursive: true, force: true });
+  sharedScriptDir = undefined;
+});
+
+/**
  * A temporary OpenSuperWhisper agents directory whose `app.pid` is this test process and whose
- * `app.executable` is a fake `agent-hook` shell script. It never touches the real app.
+ * `app.executable` is the fake `agent-hook` script. It never touches the real app.
  */
 export class FakeApp {
   readonly dir = mkdtempSync(join(tmpdir(), "pi-osw-test-"));
   readonly agentsDir = join(this.dir, "agents");
   readonly executable = join(this.dir, "agent-hook");
   private readonly runsDir = join(this.dir, "runs");
-  private readonly stdoutFile = join(this.dir, "stdout");
+  private readonly startedFile = join(this.dir, "started");
 
   constructor(behavior: HookBehavior = { kind: "silent" }) {
     mkdirSync(this.agentsDir);
     mkdirSync(this.runsDir);
     this.writePid(String(process.pid));
-    writeFileSync(join(this.agentsDir, "app.executable"), `${this.executable}\n`);
-    this.setBehavior(behavior);
+    this.pointExecutableAt(this.executable);
+    symlinkSync(fakeHookScript(), this.executable);
+    writeFileSync(join(this.dir, "behavior"), behavior.kind === "reply" ? "print" : behavior.kind);
+    writeFileSync(join(this.dir, "stdout"), stdoutFor(behavior));
   }
 
   writePid(contents: string): void {
@@ -53,24 +100,21 @@ export class FakeApp {
     writeFileSync(join(this.agentsDir, "app.executable"), `${path}\n`);
   }
 
-  setBehavior(behavior: HookBehavior, { executable = true } = {}): void {
-    const record = [
-      "#!/bin/sh",
-      `run="${this.runsDir}/$$"`,
-      'mkdir -p "$run.tmp"',
-      `printf '%s\\n' "$@" > "$run.tmp/argv"`,
-      `cat > "$run.tmp/stdin"`,
-      `env -0 > "$run.tmp/env"`,
-      'mv "$run.tmp" "$run"',
-    ];
-    writeFileSync(this.stdoutFile, stdoutFor(behavior));
-    writeFileSync(this.executable, [...record, ...actionFor(behavior, this.dir), ""].join("\n"));
-    chmodSync(this.executable, executable ? 0o755 : 0o644);
+  /** Replaces the hook with a copy that lacks the executable bit. */
+  makeExecutableNotExecutable(): void {
+    rmSync(this.executable);
+    writeFileSync(this.executable, FAKE_HOOK_SCRIPT, { mode: 0o644 });
   }
 
   /** Lets a `reply-on-release` hook print its reply. */
   release(): void {
     writeFileSync(join(this.dir, "release"), "");
+  }
+
+  /** Pids of every hook that started, recorded first thing so even a quickly killed hook shows up. */
+  startedPids(): number[] {
+    if (!existsSync(this.startedFile)) return [];
+    return readFileSync(this.startedFile, "utf8").split("\n").filter(Boolean).map(Number);
   }
 
   runs(): HookRun[] {
@@ -99,14 +143,8 @@ export class FakeApp {
     return this.runs();
   }
 
+  /** Leaves running hooks to the extension (tests end with session_shutdown); fake hooks also exit after 30 s. */
   cleanup(): void {
-    if (existsSync(this.runsDir)) {
-      for (const run of this.runs()) {
-        try {
-          process.kill(run.pid, "SIGKILL");
-        } catch {}
-      }
-    }
     rmSync(this.dir, { recursive: true, force: true });
   }
 }
@@ -123,27 +161,6 @@ function stdoutFor(behavior: HookBehavior): string {
       return JSON.stringify({ decision: "block", reason: `${REPLY_PREFIX}should never arrive` });
     default:
       return "";
-  }
-}
-
-function actionFor(behavior: HookBehavior, dir: string): string[] {
-  const stdoutFile = join(dir, "stdout");
-  switch (behavior.kind) {
-    case "reply":
-    case "print":
-      return [`cat "${stdoutFile}"`];
-    case "silent":
-      return ["exit 0"];
-    case "fail":
-      return [`cat "${stdoutFile}"`, "exit 1"];
-    case "sleep":
-      return ["exec sleep 30"];
-    case "reply-on-term":
-      // Simulates a reply that lands at the same instant the hook is cancelled.
-      return [`trap 'kill $! 2>/dev/null; cat "${stdoutFile}"; exit 0' TERM`, "sleep 30 &", "wait"];
-    case "reply-on-release":
-      // Replies only once the test calls `release()`, so the test controls the timing.
-      return [`while [ ! -e "${join(dir, "release")}" ]; do sleep 0.02; done`, `cat "${stdoutFile}"`];
   }
 }
 

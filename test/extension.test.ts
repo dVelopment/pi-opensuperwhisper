@@ -119,7 +119,7 @@ describe("app discovery", () => {
 
   test("does nothing when the executable is not executable", async () => {
     const { app, host } = setup();
-    app.setBehavior({ kind: "reply", text: "unreachable" }, { executable: false });
+    app.makeExecutableNotExecutable();
     await settle(host);
     await expectNoSpawn(app, host);
   });
@@ -414,9 +414,10 @@ describe("cancellation", () => {
   });
 
   test("the hard-kill timer stops a hook that outlives the app's own wait", async () => {
-    // Long enough for the fake hook to record its run before the timer fires.
-    const { host, run } = await pendingHook({ kind: "reply-on-term", text: "hung" }, { hardKillMs: 500 });
-    await expectKilledWithoutReply(host, run.pid);
+    const { app, host } = setup({ kind: "reply-on-term", text: "hung" }, { hardKillMs: 300 });
+    await settle(host);
+    await waitFor(() => app.startedPids().length > 0, "the hook to start");
+    await expectKilledWithoutReply(host, app.startedPids()[0] ?? 0);
   });
 
   test("a delivered reply leaves nothing to cancel", async () => {
