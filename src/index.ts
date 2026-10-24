@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { locateApp } from "./app.ts";
 import { runStopHook } from "./hook.ts";
 import { type AssistantMessageLike, extractText, parseReply } from "./message.ts";
@@ -22,15 +22,17 @@ const DEFAULT_OPTIONS: ExtensionOptions = {
 export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi: ExtensionAPI) => void {
   const options = { ...DEFAULT_OPTIONS, ...overrides };
   return (pi) => {
-    pi.on("agent_settled", async (_event, ctx) => {
-      const message = lastAssistant(ctx.sessionManager.getBranch().flatMap((entry) => (entry.type === "message" ? [entry.message] : [])));
-      const text = message && extractText(message);
+    /** Opens the panel for a settled run, unless a guard says the user shouldn't be asked. */
+    function requestReply(ctx: ExtensionContext, message: AssistantMessageLike | undefined, sessionId: string): void {
+      if (options.platform !== "darwin" || ctx.mode !== "tui") return;
+      if (!message || message.stopReason === "aborted" || message.stopReason === "error") return;
+      const text = extractText(message);
       if (!text) return;
       const executable = locateApp(options.agentsDir);
       if (!executable) return;
       const run = runStopHook(executable, {
         hook_event_name: "Stop",
-        session_id: ctx.sessionManager.getHeader()?.id ?? "",
+        session_id: sessionId,
         cwd: ctx.cwd,
         last_assistant_message: text,
         stop_hook_active: false,
@@ -39,6 +41,12 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
         const reply = stdout && parseReply(stdout);
         if (reply) pi.sendUserMessage(reply);
       });
+    }
+
+    pi.on("agent_settled", (event, ctx) => {
+      if (event.aborted) return;
+      const messages = ctx.sessionManager.getBranch().flatMap((entry) => (entry.type === "message" ? [entry.message] : []));
+      requestReply(ctx, lastAssistant(messages), ctx.sessionManager.getHeader()?.id ?? "");
     });
   };
 }
