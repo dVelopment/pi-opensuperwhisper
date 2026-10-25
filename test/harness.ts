@@ -14,7 +14,11 @@ export type HookBehavior =
   | { kind: "fail" }
   | { kind: "sleep" }
   | { kind: "reply-on-term"; text: string }
-  | { kind: "reply-on-release"; text: string };
+  | { kind: "reply-on-release"; text: string }
+  /** Prints a question answer (keyed by question text) as soon as it has read stdin. */
+  | { kind: "answer"; answers: Record<string, string> }
+  /** Prints a question answer once the test calls release(). */
+  | { kind: "answer-on-release"; answers: Record<string, string> };
 
 export interface HookRun {
   pid: number;
@@ -43,8 +47,8 @@ case "$(cat "$dir/behavior")" in
   sleep) exec sleep 30 ;;
   # A reply that lands at the same instant the hook is cancelled.
   reply-on-term) trap 'cat "$dir/stdout"; exit 0' TERM; while :; do sleep 0.05; done ;;
-  # A reply that waits for the test to call release().
-  reply-on-release) while [ ! -e "$dir/release" ]; do sleep 0.02; done; cat "$dir/stdout" ;;
+  # Output that waits for the test to call release().
+  print-on-release) while [ ! -e "$dir/release" ]; do sleep 0.02; done; cat "$dir/stdout" ;;
 esac
 exit 0
 `;
@@ -84,7 +88,7 @@ export class FakeApp {
     this.writePid(String(process.pid));
     this.pointExecutableAt(this.executable);
     symlinkSync(fakeHookScript(), this.executable);
-    writeFileSync(join(this.dir, "behavior"), behavior.kind === "reply" ? "print" : behavior.kind);
+    writeFileSync(join(this.dir, "behavior"), scriptBehavior(behavior));
     writeFileSync(join(this.dir, "stdout"), stdoutFor(behavior));
   }
 
@@ -149,12 +153,29 @@ export class FakeApp {
   }
 }
 
+/** The fake script's case for a behaviour: the kinds that differ only in their stdout share one. */
+function scriptBehavior(behavior: HookBehavior): string {
+  switch (behavior.kind) {
+    case "reply":
+    case "answer":
+      return "print";
+    case "reply-on-release":
+    case "answer-on-release":
+      return "print-on-release";
+    default:
+      return behavior.kind;
+  }
+}
+
 function stdoutFor(behavior: HookBehavior): string {
   switch (behavior.kind) {
     case "reply":
     case "reply-on-term":
     case "reply-on-release":
       return JSON.stringify({ decision: "block", reason: `${REPLY_PREFIX}${behavior.text}` });
+    case "answer":
+    case "answer-on-release":
+      return questionAnswerStdout(behavior.answers);
     case "print":
       return behavior.stdout;
     case "fail":
@@ -162,6 +183,13 @@ function stdoutFor(behavior: HookBehavior): string {
     default:
       return "";
   }
+}
+
+/** What `agent-hook question` prints when the user answers in the panel (answers keyed by question text). */
+export function questionAnswerStdout(answers: Record<string, string>): string {
+  return JSON.stringify({
+    hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: { answers } },
+  });
 }
 
 export function isAlive(pid: number): boolean {

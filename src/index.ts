@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { locateApp } from "./app.ts";
-import { runStopHook, type StopHook } from "./hook.ts";
+import { type HookProcess, runHook, type StopRequest } from "./hook.ts";
 import { type AssistantMessageLike, extractText, parseReply } from "./message.ts";
 
 export interface ExtensionOptions {
@@ -24,7 +24,7 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
   return (pi) => {
     // At most one pending panel request per session. Bumping the generation orphans any reply
     // still in flight, so typed input racing a panel reply produces exactly one run.
-    let pending: StopHook | undefined;
+    let pending: HookProcess | undefined;
     let generation = 0;
 
     function cancelPending(): void {
@@ -43,13 +43,14 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
       const executable = locateApp(options.agentsDir);
       if (!executable) return;
       const request = generation;
-      pending = runStopHook(executable, {
+      const stopRequest: StopRequest = {
         hook_event_name: "Stop",
         session_id: sessionId,
         cwd: ctx.cwd,
         last_assistant_message: text,
         stop_hook_active: false,
-      });
+      };
+      pending = runHook(executable, "stop", stopRequest);
       // Safety net in case the hook outlives the app's own wait (30–590 s).
       const hardKill = setTimeout(() => {
         if (request === generation) cancelPending();
