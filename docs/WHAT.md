@@ -1,12 +1,12 @@
 # What pi-opensuperwhisper does
 
-A pi extension (also loadable in oh-my-pi) that hands the agent's last message to the running OpenSuperWhisper macOS app when a run settles. If the user answers in the app's panel, the extension sends that answer back to the agent as the next user message.
+A pi extension (also loadable in oh-my-pi) that hands the agent's last message to the running OpenSuperWhisper macOS app when a run settles. If the user answers in the app's panel, the extension sends that answer back to the agent as the next user message. On oh-my-pi it also opens the questions of the `ask` tool in the panel.
 
 > The pi and oh-my-pi API names below were checked against pi `@earendil-works/pi-coding-agent` 1.1.0 and oh-my-pi 18.12.6 source on 2026-10-24. Hosts change quickly; re-check them when upgrading:
 > - pi: `packages/coding-agent/docs/extensions.md` in [badlogic/pi-mono](https://github.com/badlogic/pi-mono)
 > - oh-my-pi: [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi), `packages/coding-agent/src/extensibility/extensions/types.ts`
 >
-> The full spec is GitHub issue [#1](https://github.com/dVelopment/pi-opensuperwhisper/issues/1).
+> The full spec is GitHub issue [#1](https://github.com/dVelopment/pi-opensuperwhisper/issues/1); Phase 2 (questions) is issue [#3](https://github.com/dVelopment/pi-opensuperwhisper/issues/3).
 
 ## Reference: how the Claude Code plugin works upstream
 
@@ -100,18 +100,33 @@ env: inherit `process.env` and set `CLAUDE_PROJECT_DIR=<cwd>`. See "Agent detect
 
 **Timeout.** Rely on the app's own wait (clamped to 30–590 s). As a safety net, hard-kill the hook after 600 s.
 
-### Phase 2: questions (oh-my-pi `ask` tool, out of scope for the MVP)
+### Phase 2: questions (oh-my-pi `ask` tool)
 
-- oh-my-pi has an `ask` tool (a structured option picker). pi core has none.
-- Its input schema is `questions[{id, question, header?, options[{label, description?, preview?}], multi?, recommended?}]`. Map it to the app's question format:
+oh-my-pi has a built-in `ask` tool (a structured option picker); pi core has none, so this is oh-my-pi only. Paths below are in oh-my-pi 18.12.6 `packages/coding-agent/src/`.
 
-  ```
-  questions: [{ question, header?, options: [{ label, description? }], multiSelect }]
-  ```
+**Shadow the built-in.** A `tool_call` handler can only block a call or revise its input (`extensibility/extensions/wrapper.ts`), and `tool_result` runs after the native tool has finished, so neither can answer `ask` from the panel or close the terminal dialog. Instead the extension re-registers `ask` and delegates to the native built-in with `ctx.invokeTool(params, { signal })` (`extensibility/extensions/types.ts`). Its own `AbortController` on that signal lets a panel answer close the terminal dialog.
 
-- Spawn `agent-hook question` with `{"tool_name":"AskUserQuestion","tool_input":{...}}`.
-- On `hookSpecificOutput.permissionDecision === "allow"`, map `updatedInput.answers` back into the `ask` tool's expected result.
-- Unverified: whether a `tool_call` handler can replace a tool's result rather than only block it. Tracked in a separate issue.
+**Registration.** On `session_start`, on oh-my-pi only, when `pi.getAllTools()` lists `ask` with `sourceInfo.source === "builtin"`; once per extension instance. The definition reuses the built-in's `description` and `parameters`, so the model sees the same tool, and copies its traits (`tools/ask.ts`): `label: "Ask"`, `approval: "read"`, `strict: true`, `loadMode: "discoverable"` and `concurrency: "exclusive"` (the dialog is one shared UI surface).
+
+**Guards.** The panel joins only on macOS, in TUI mode, in the main agent (`ctx.agent.kind === "main"`), with the app alive, and when the call's question texts are distinct: the app keys answers by question text. Otherwise `ask` is a plain `ctx.invokeTool(params)`, exactly the native behavior. Without `ctx.invokeTool` (no native `ask` to delegate to) the call fails with an error.
+
+**Request.** `questions[{id, question, header?, options[{label, description?, preview?}], multi?, recommended?}]` maps to the stdin of `agent-hook question`, with `CLAUDE_PROJECT_DIR` set as for the Stop hook:
+
+```json
+{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"…","header":"…","options":[{"label":"…","description":"…"}],"multiSelect":false}]},"session_id":"…","cwd":"…"}
+```
+
+**Answer.** Exit 0 with `hookSpecificOutput.permissionDecision === "allow"` and `updatedInput.answers` keyed by question text (`AgentHookCommand.swift`). A value is one label, the picked labels joined with `", "` (multi-select), or free text (`AgentInbox.swift`). The extension maps it back to the exact result native `ask` returns for the same selections: one question → `User selected: A, B` or `User provided custom input: …` with that question's `details`; several → `User answers:` plus one line per question with `details.results`. Anything else (dismissed, timed out, app gone, malformed output) is no answer.
+
+**Race: the first answer wins.** Per call:
+
+1. Start the native `ask` with a signal combining the outer one and the extension's own, and spawn `agent-hook question`.
+2. Native settles first (answer, error or cancel) → kill the hook; the native result or error stands unchanged.
+3. The panel answers first → abort the native dialog, swallow its `ToolAbortError`, return the mapped result.
+4. The panel closes without an answer → keep waiting for the native dialog.
+5. The outer signal aborts, or `session_shutdown` → kill the hook; the native dialog decides the outcome. The 600 s hard-kill safety net applies as for the Stop hook.
+
+**Known cost.** A shadowed built-in loses oh-my-pi's built-in transcript renderer for `ask` (`useBuiltInRenderer: hasBuiltInTool(name)` in `modes/controllers/event-controller.ts`), so `ask` calls render like other extension tools. The interactive dialog is unaffected.
 
 ### Phase 3 (optional): permission gate
 
@@ -150,6 +165,7 @@ The exact `agentEnabledKinds` default wasn't found in upstream source. The smoke
 | Settle trigger | `agent_settled` | terminal `agent_end` + idle check |
 | Session id | `ctx.sessionManager.getHeader()?.id` | `ctx.sessionManager.getSessionId()` |
 | Subagents | none in core | `ctx.agent.kind === "sub"`, skipped |
+| `ask` questions in the panel | no built-in `ask` | shadows the built-in `ask` |
 | User dir | `~/.pi` | `~/.omp` |
 | Manifest key | `pi.extensions` | `omp.extensions` (falls back to `pi.extensions`) |
 | Install | `pi install npm:@stibbons/pi-opensuperwhisper` | `omp plugin install @stibbons/pi-opensuperwhisper` |
@@ -166,10 +182,11 @@ No build step: the package ships TypeScript source, and both manifest keys point
 pi-opensuperwhisper/
 ├── package.json        # "pi": { "extensions": ["./src/index.ts"] }, "omp": { "extensions": ["./src/index.ts"] }
 ├── src/
-│   ├── index.ts        # extension factory: event wiring, host detection, guards, pending request, cancellation
+│   ├── index.ts        # extension factory: event wiring, host detection, guards, pending request, cancellation, `ask` shadow
 │   ├── app.ts          # locate app (pid/executable), liveness check
-│   ├── hook.ts         # spawn agent-hook stop, write stdin, collect stdout, kill handle
-│   └── message.ts      # extract assistant text, parse the reply and strip its prefix
+│   ├── hook.ts         # spawn agent-hook stop/question, write stdin, collect stdout, kill handle
+│   ├── message.ts      # extract assistant text, parse the reply and strip its prefix
+│   └── question.ts     # map ask calls to agent-hook question requests and panel answers to ask results
 ├── test/               # bun test: extension factory against a fake agent-hook script; pure parsers
 ├── docs/WHAT.md
 ├── docs/WHY.md
