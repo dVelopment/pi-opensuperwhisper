@@ -1,9 +1,17 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentEndEvent,
+  AgentToolResult,
+  ExtensionAPI,
+  ExtensionContext,
+  ToolDefinition,
+  ToolInfo,
+} from "@earendil-works/pi-coding-agent";
 import { locateApp } from "./app.ts";
 import { type HookProcess, runHook, type StopRequest } from "./hook.ts";
 import { type AssistantMessageLike, extractText, parseReply } from "./message.ts";
+import { type AskInput, parseQuestionAnswers, toQuestionRequest } from "./question.ts";
 
 export interface ExtensionOptions {
   /** OpenSuperWhisper's agent registry directory (holds `app.pid` and `app.executable`). */
@@ -98,6 +106,77 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
       if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
       requestReply(ctx, lastAssistant(messages), ctx.sessionManager.getSessionId());
     });
+
+    // omp: shadow the built-in `ask` and race its native dialog against the panel; the first
+    // answer wins. pi has no built-in `ask`.
+    let askRegistered = false;
+    /** Panel requests of `ask` calls still in flight. */
+    const askHooks = new Set<HookProcess>();
+
+    pi.on("session_start", (_event, ctx) => {
+      if (askRegistered || !isOmp(ctx)) return;
+      const builtin = pi.getAllTools().find((tool) => tool.name === "ask" && tool.sourceInfo.source === "builtin");
+      if (!builtin) return;
+      askRegistered = true;
+      const ask: OmpToolDefinition = {
+        name: "ask",
+        description: builtin.description,
+        parameters: builtin.parameters,
+        // The native tool's traits (`tools/ask.ts`). Exclusive: the dialog is one shared UI
+        // surface, so two concurrent asks would clobber each other.
+        label: "Ask",
+        approval: "read",
+        strict: true,
+        loadMode: "discoverable",
+        concurrency: "exclusive",
+        execute: (_toolCallId, params, signal, _onUpdate, toolCtx) =>
+          answerAsk(params as Record<string, unknown>, signal, toolCtx as unknown as OmpToolContext),
+      };
+      pi.registerTool(ask);
+    });
+    pi.on("session_shutdown", () => {
+      for (const hook of askHooks) hook.kill();
+    });
+
+    /** Runs the native `ask`, plus the panel when a guard doesn't rule it out. */
+    async function answerAsk(params: Record<string, unknown>, signal: AbortSignal | undefined, ctx: OmpToolContext) {
+      if (!ctx.invokeTool) throw new Error("omp offers no native `ask` to delegate to");
+      const input = params as unknown as AskInput;
+      const request =
+        options.platform === "darwin" && ctx.mode === "tui" && ctx.agent.kind === "main"
+          ? toQuestionRequest(input, ctx.sessionManager.getSessionId(), ctx.cwd)
+          : undefined;
+      const executable = request && locateApp(options.agentsDir);
+      if (!request || !executable) return ctx.invokeTool(params);
+
+      const ours = new AbortController();
+      const native = ctx.invokeTool(params, { signal: signal ? AbortSignal.any([signal, ours.signal]) : ours.signal });
+      const hook = runHook(executable, "question", request);
+      askHooks.add(hook);
+      const kill = () => hook.kill();
+      signal?.addEventListener("abort", kill, { once: true });
+      // Safety net in case the hook outlives the app's own wait (590 s).
+      const hardKill = setTimeout(kill, options.hardKillMs);
+      hardKill.unref();
+      try {
+        // Resolves with the panel's answer, or nothing once native settled or the panel closed
+        // without one. Handling native's rejection here also swallows the one our abort causes.
+        const answer = await Promise.race([
+          native.then(() => undefined, () => undefined),
+          hook.stdout.then((stdout) => (stdout === undefined ? undefined : parseQuestionAnswers(stdout, input))),
+        ]);
+        if (answer) {
+          ours.abort();
+          return answer;
+        }
+        return await native;
+      } finally {
+        clearTimeout(hardKill);
+        signal?.removeEventListener("abort", kill);
+        askHooks.delete(hook);
+        hook.kill();
+      }
+    }
   };
 }
 
@@ -105,6 +184,19 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
 interface OmpContext extends ExtensionContext {
   getAsyncJobSnapshot(): unknown;
   agent: { kind: "main" | "sub" };
+}
+
+/** The `ctx` omp passes to a tool that re-registers a built-in: `invokeTool` runs the native one. */
+interface OmpToolContext extends OmpContext {
+  invokeTool?(params: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<AgentToolResult<unknown>>;
+}
+
+/** omp-only tool traits (`extensibility/extensions/types.ts`, proxied by `RegisteredToolAdapter`). */
+interface OmpToolDefinition extends ToolDefinition {
+  approval: "read";
+  strict: boolean;
+  loadMode: "discoverable";
+  concurrency: "exclusive";
 }
 
 interface OmpAgentEndEvent extends AgentEndEvent {
