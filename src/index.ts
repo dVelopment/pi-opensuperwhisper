@@ -17,7 +17,7 @@ export interface ExtensionOptions {
   /** OpenSuperWhisper's agent registry directory (holds `app.pid` and `app.executable`). */
   agentsDir: string;
   platform: NodeJS.Platform;
-  /** Safety net: kill a hook that outlives the app's own maximum wait (590 s). */
+  /** Safety net: kill a hook that outlives the app's own wait (30–590 s). */
   hardKillMs: number;
 }
 
@@ -29,11 +29,26 @@ const DEFAULT_OPTIONS: ExtensionOptions = {
 
 export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi: ExtensionAPI) => void {
   const options = { ...DEFAULT_OPTIONS, ...overrides };
+
+  /** The panel is a macOS app, and only an interactive terminal session has a user to ask. */
+  function canShowPanel(ctx: ExtensionContext): boolean {
+    return options.platform === "darwin" && ctx.mode === "tui";
+  }
+
+  /** Calls `kill` once the hook has outlived `hardKillMs`. Returns the function that disarms it. */
+  function armHardKill(kill: () => void): () => void {
+    const timer = setTimeout(kill, options.hardKillMs);
+    timer.unref();
+    return () => clearTimeout(timer);
+  }
+
   return (pi) => {
     // At most one pending panel request per session. Bumping the generation orphans any reply
     // still in flight, so typed input racing a panel reply produces exactly one run.
     let pending: HookProcess | undefined;
     let generation = 0;
+    /** Panel requests of `ask` calls still in flight. */
+    const askHooks = new Set<HookProcess>();
 
     function cancelPending(): void {
       generation++;
@@ -44,7 +59,7 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
     /** Opens the panel for a settled run, unless a guard says the user shouldn't be asked. */
     function requestReply(ctx: ExtensionContext, message: AssistantMessageLike | undefined, sessionId: string): void {
       cancelPending();
-      if (options.platform !== "darwin" || ctx.mode !== "tui") return;
+      if (!canShowPanel(ctx)) return;
       if (!message || message.stopReason === "aborted" || message.stopReason === "error") return;
       const text = extractText(message);
       if (!text) return;
@@ -59,13 +74,11 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
         stop_hook_active: false,
       };
       pending = runHook(executable, "stop", stopRequest);
-      // Safety net in case the hook outlives the app's own wait (30–590 s).
-      const hardKill = setTimeout(() => {
+      const disarmHardKill = armHardKill(() => {
         if (request === generation) cancelPending();
-      }, options.hardKillMs);
-      hardKill.unref();
+      });
       void pending.stdout.then((stdout) => {
-        clearTimeout(hardKill);
+        disarmHardKill();
         if (request !== generation) return;
         pending = undefined;
         const reply = stdout && parseReply(stdout);
@@ -84,7 +97,10 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
       if (event.source !== "extension") cancelPending();
     });
     pi.on("agent_start", cancelPending);
-    pi.on("session_shutdown", cancelPending);
+    pi.on("session_shutdown", () => {
+      cancelPending();
+      for (const hook of askHooks) hook.kill();
+    });
     pi.on("session_before_switch", cancelPending);
 
     // pi: fires once the run is fully settled (no retry, compaction or queued continuation left).
@@ -110,8 +126,6 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
     // omp: shadow the built-in `ask` and race its native dialog against the panel; the first
     // answer wins. pi has no built-in `ask`.
     let askRegistered = false;
-    /** Panel requests of `ask` calls still in flight. */
-    const askHooks = new Set<HookProcess>();
 
     pi.on("session_start", (_event, ctx) => {
       if (askRegistered || !isOmp(ctx)) return;
@@ -134,9 +148,6 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
       };
       pi.registerTool(ask);
     });
-    pi.on("session_shutdown", () => {
-      for (const hook of askHooks) hook.kill();
-    });
 
     /** Runs the native `ask`, plus the panel when a guard doesn't rule it out. */
     async function answerAsk(params: Record<string, unknown>, signal: AbortSignal | undefined, ctx: OmpToolContext) {
@@ -144,35 +155,35 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
       // The panel must show and answer the text native shows; native gets the call unchanged.
       const input = sanitizeAskInput(params as unknown as AskInput);
       const request =
-        options.platform === "darwin" && ctx.mode === "tui" && ctx.agent.kind === "main" && !signal?.aborted
+        canShowPanel(ctx) && ctx.agent.kind === "main" && !signal?.aborted
           ? toQuestionRequest(input, ctx.sessionManager.getSessionId(), ctx.cwd)
           : undefined;
       const executable = request && locateApp(options.agentsDir);
       if (!request || !executable) return ctx.invokeTool(params);
 
-      const ours = new AbortController();
-      const native = ctx.invokeTool(params, { signal: signal ? AbortSignal.any([signal, ours.signal]) : ours.signal });
+      const abortNativeDialog = new AbortController();
+      const native = ctx.invokeTool(params, {
+        signal: signal ? AbortSignal.any([signal, abortNativeDialog.signal]) : abortNativeDialog.signal,
+      });
       const hook = runHook(executable, "question", request);
       askHooks.add(hook);
       const kill = () => hook.kill();
       signal?.addEventListener("abort", kill, { once: true });
-      // Safety net in case the hook outlives the app's own wait (590 s).
-      const hardKill = setTimeout(kill, options.hardKillMs);
-      hardKill.unref();
+      const disarmHardKill = armHardKill(kill);
       try {
         // Resolves with the panel's answer, or nothing once native settled or the panel closed
-        // without one. Handling native's rejection here also swallows the one our abort causes.
+        // without one. Handling native's rejection here also swallows the one the panel's win causes.
         const answer = await Promise.race([
           native.then(() => undefined, () => undefined),
           hook.stdout.then((stdout) => (stdout === undefined ? undefined : parseQuestionAnswers(stdout, input))),
         ]);
         if (answer) {
-          ours.abort();
+          abortNativeDialog.abort();
           return answer;
         }
         return await native;
       } finally {
-        clearTimeout(hardKill);
+        disarmHardKill();
         signal?.removeEventListener("abort", kill);
         askHooks.delete(hook);
         hook.kill();

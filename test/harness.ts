@@ -88,8 +88,9 @@ export class FakeApp {
     this.writePid(String(process.pid));
     this.pointExecutableAt(this.executable);
     symlinkSync(fakeHookScript(), this.executable);
-    writeFileSync(join(this.dir, "behavior"), scriptBehavior(behavior));
-    writeFileSync(join(this.dir, "stdout"), stdoutFor(behavior));
+    const { script, stdout } = scriptFor(behavior);
+    writeFileSync(join(this.dir, "behavior"), script);
+    writeFileSync(join(this.dir, "stdout"), stdout);
   }
 
   writePid(contents: string): void {
@@ -153,35 +154,27 @@ export class FakeApp {
   }
 }
 
-/** The fake script's case for a behaviour: the kinds that differ only in their stdout share one. */
-function scriptBehavior(behavior: HookBehavior): string {
+/** The fake script's case for a behaviour and the stdout it prints: the kinds that differ only in their stdout share a case. */
+function scriptFor(behavior: HookBehavior): { script: string; stdout: string } {
+  const reply = (text: string) => JSON.stringify({ decision: "block", reason: `${REPLY_PREFIX}${text}` });
   switch (behavior.kind) {
     case "reply":
-    case "answer":
-      return "print";
-    case "reply-on-release":
-    case "answer-on-release":
-      return "print-on-release";
-    default:
-      return behavior.kind;
-  }
-}
-
-function stdoutFor(behavior: HookBehavior): string {
-  switch (behavior.kind) {
-    case "reply":
+      return { script: "print", stdout: reply(behavior.text) };
     case "reply-on-term":
+      return { script: "reply-on-term", stdout: reply(behavior.text) };
     case "reply-on-release":
-      return JSON.stringify({ decision: "block", reason: `${REPLY_PREFIX}${behavior.text}` });
+      return { script: "print-on-release", stdout: reply(behavior.text) };
     case "answer":
+      return { script: "print", stdout: questionAnswerStdout(behavior.answers) };
     case "answer-on-release":
-      return questionAnswerStdout(behavior.answers);
+      return { script: "print-on-release", stdout: questionAnswerStdout(behavior.answers) };
     case "print":
-      return behavior.stdout;
+      return { script: "print", stdout: behavior.stdout };
     case "fail":
-      return JSON.stringify({ decision: "block", reason: `${REPLY_PREFIX}should never arrive` });
-    default:
-      return "";
+      return { script: "fail", stdout: reply("should never arrive") };
+    case "silent":
+    case "sleep":
+      return { script: behavior.kind, stdout: "" };
   }
 }
 
