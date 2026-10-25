@@ -2,7 +2,7 @@ import { afterAll } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 export const REPLY_PREFIX = "The user answered by voice, through OpenSuperWhisper:\n\n";
 
@@ -110,7 +110,7 @@ export class FakeApp {
     writeFileSync(this.executable, FAKE_HOOK_SCRIPT, { mode: 0o644 });
   }
 
-  /** Lets a `reply-on-release` hook print its reply. */
+  /** Lets a `reply-on-release` or `answer-on-release` hook print its output. */
   release(): void {
     writeFileSync(join(this.dir, "release"), "");
   }
@@ -214,11 +214,49 @@ export const NO_SPAWN_GRACE_MS = 250;
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
-/** A fake host `ExtensionAPI` that records handlers and `sendUserMessage` calls. */
+/** The omp `ToolInfo` shape `getAllTools()` returns (`extensibility/extensions/types.ts`). */
+export interface OmpToolInfo {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  sourceInfo: { path: string; source: string; scope: string; origin: string };
+}
+
+/** omp's built-in `ask`, as `getAllTools()` lists it (`session/session-tools.ts` `getAllToolInfos`). */
+export const BUILTIN_ASK: OmpToolInfo = {
+  name: "ask",
+  description: "Ask the user one or more questions with predefined options.",
+  parameters: {
+    type: "object",
+    properties: {
+      questions: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            question: { type: "string" },
+            options: { type: "array", items: { type: "object", properties: { label: { type: "string" } } } },
+            multi: { type: "boolean" },
+          },
+          required: ["id", "question", "options"],
+        },
+      },
+    },
+    required: ["questions"],
+  },
+  sourceInfo: { path: "<builtin:ask>", source: "builtin", scope: "temporary", origin: "top-level" },
+};
+
+/** A fake host `ExtensionAPI` that records handlers, `sendUserMessage` calls and registered tools. */
 export class FakeHost {
   readonly sent: { content: unknown; options: unknown }[] = [];
   /** When set, `sendUserMessage` throws after recording, like a host whose session went away. */
   rejectDelivery = false;
+  /** Every definition passed to `registerTool`, in order. */
+  readonly registeredTools: ToolDefinition[] = [];
+  /** What `getAllTools()` returns. */
+  allTools: OmpToolInfo[] = [BUILTIN_ASK];
   private readonly handlers = new Map<string, Handler[]>();
 
   readonly api = {
@@ -232,6 +270,10 @@ export class FakeHost {
       this.sent.push({ content, options });
       if (this.rejectDelivery) throw new Error("session disposed");
     },
+    registerTool: (tool: ToolDefinition) => {
+      this.registeredTools.push(tool);
+    },
+    getAllTools: () => this.allTools,
   } as unknown as ExtensionAPI;
 
   /** Fires a host event and waits for every handler to return, like the host does. */
@@ -268,6 +310,69 @@ interface CtxOptions {
   pendingMessages?: boolean;
 }
 
+type InvokeTool = (params: Record<string, unknown>, options?: { signal?: AbortSignal }) => Promise<AgentToolResult<unknown>>;
+
+/** Like omp's `ToolAbortError` (`tools/tool-errors.ts`), which a cancelled native `ask` throws. */
+export class ToolAbortError extends Error {
+  constructor(message = "Operation aborted") {
+    super(message);
+    this.name = "ToolAbortError";
+  }
+}
+
+type Outcome = { ok: true; result: AgentToolResult<unknown> } | { ok: false; error: unknown };
+
+/**
+ * omp's native `ask` behind `ctx.invokeTool`. A call waits until the test settles it with
+ * `resolve`/`reject` (also allowed before the call), or until its `signal` aborts, which rejects
+ * with a `ToolAbortError` like the native dialog does.
+ */
+export class FakeNativeAsk {
+  /** Every call: the params and the signal it was given. */
+  readonly calls: { params: Record<string, unknown>; signal: AbortSignal | undefined }[] = [];
+  private outcome: Outcome | undefined;
+  private readonly waiting = new Set<(outcome: Outcome) => void>();
+
+  readonly invokeTool: InvokeTool = (params, options) => {
+    const signal = options?.signal;
+    this.calls.push({ params, signal });
+    const { promise, resolve, reject } = Promise.withResolvers<AgentToolResult<unknown>>();
+    const settle = (outcome: Outcome) => {
+      this.waiting.delete(settle);
+      signal?.removeEventListener("abort", onAbort);
+      if (outcome.ok) resolve(outcome.result);
+      else reject(outcome.error);
+    };
+    const onAbort = () => settle({ ok: false, error: new ToolAbortError("Ask tool was cancelled by the user") });
+    if (this.outcome) settle(this.outcome);
+    else if (signal?.aborted) onAbort();
+    else {
+      this.waiting.add(settle);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    }
+    return promise;
+  };
+
+  /** Settles pending and future calls with this result. */
+  resolve(result: AgentToolResult<unknown>): void {
+    this.settleAll({ ok: true, result });
+  }
+
+  /** Settles pending and future calls by throwing this error. */
+  reject(error: unknown): void {
+    this.settleAll({ ok: false, error });
+  }
+
+  async waitForCalls(count: number): Promise<void> {
+    await waitFor(() => this.calls.length >= count, `${count} native ask call(s)`);
+  }
+
+  private settleAll(outcome: Outcome): void {
+    this.outcome = outcome;
+    for (const settle of [...this.waiting]) settle(outcome);
+  }
+}
+
 /** A pi-shaped `ctx`: no `getAsyncJobSnapshot`, no `agent`; the session id is on the header. */
 export function piCtx(messages: unknown[], { mode = "tui", cwd = "/work/project", idle = true, pendingMessages = false }: CtxOptions = {}) {
   return {
@@ -286,14 +391,15 @@ export function piCtx(messages: unknown[], { mode = "tui", cwd = "/work/project"
   };
 }
 
-/** An omp-shaped `ctx`: has `getAsyncJobSnapshot` and an agent identity. */
+/** An omp-shaped `ctx`: has `getAsyncJobSnapshot` and an agent identity; `invokeTool` only when given. */
 export function ompCtx({
   mode = "tui",
   cwd = "/work/project",
   idle = true,
   pendingMessages = false,
   agentKind = "main",
-}: CtxOptions & { agentKind?: "main" | "sub" } = {}) {
+  invokeTool,
+}: CtxOptions & { agentKind?: "main" | "sub"; invokeTool?: InvokeTool } = {}) {
   return {
     mode,
     hasUI: mode === "tui" || mode === "rpc",
@@ -305,5 +411,6 @@ export function ompCtx({
     sessionManager: {
       getSessionId: () => "omp-session-id",
     },
+    ...(invokeTool ? { invokeTool } : {}),
   };
 }
