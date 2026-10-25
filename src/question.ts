@@ -29,6 +29,35 @@ interface PanelQuestion {
 }
 
 /**
+ * Strips the `\r` runs models sometimes inject, as native `ask` does before it shows or answers a
+ * call (`sanitizeAskParams` in `tools/ask.ts` at v18.12.6), so the panel shows and answers the
+ * same text native would.
+ */
+export function sanitizeAskInput(input: AskInput): AskInput {
+  return {
+    ...input,
+    questions: input.questions.map((q) => ({
+      ...q,
+      id: sanitizeCarriageReturns(q.id),
+      question: sanitizeCarriageReturns(q.question),
+      ...(q.header === undefined ? {} : { header: sanitizeCarriageReturns(q.header) }),
+      options: q.options.map((o) => ({
+        ...o,
+        label: sanitizeCarriageReturns(o.label),
+        ...(o.description === undefined ? {} : { description: sanitizeCarriageReturns(o.description) }),
+        ...(o.preview === undefined ? {} : { preview: sanitizeCarriageReturns(o.preview) }),
+      })),
+    })),
+  };
+}
+
+/** omp's `sanitizeCarriageReturns` (`pi-tui/render/render-utils.ts` at v18.12.6). */
+function sanitizeCarriageReturns(text: string): string {
+  if (!text.includes("\r")) return text;
+  return text.replaceAll("\r\n", "\n").replace(/\r+/g, " ");
+}
+
+/**
  * Maps an `ask` call to the stdin of `agent-hook question`. Returns nothing when the panel
  * can't represent the call: it keys answers by question text, so two questions with the same
  * text can't be told apart.
@@ -103,15 +132,15 @@ interface HookOutput {
 
 /** The `updatedInput.answers` of an allowed `agent-hook question` call, keyed by question text. */
 function readAnswers(stdout: string): Record<string, unknown> | undefined {
-  let output: HookOutput | null;
+  let json: HookOutput | null;
   try {
-    output = JSON.parse(stdout);
+    json = JSON.parse(stdout);
   } catch {
     return undefined;
   }
-  const hook = output?.hookSpecificOutput;
-  if (hook?.permissionDecision !== "allow") return undefined;
-  const answers = hook.updatedInput?.answers;
+  const output = json?.hookSpecificOutput;
+  if (output?.permissionDecision !== "allow") return undefined;
+  const answers = output.updatedInput?.answers;
   return typeof answers === "object" && answers !== null ? (answers as Record<string, unknown>) : undefined;
 }
 

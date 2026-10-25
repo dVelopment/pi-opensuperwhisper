@@ -11,7 +11,7 @@ import type {
 import { locateApp } from "./app.ts";
 import { type HookProcess, runHook, type StopRequest } from "./hook.ts";
 import { type AssistantMessageLike, extractText, parseReply } from "./message.ts";
-import { type AskInput, parseQuestionAnswers, toQuestionRequest } from "./question.ts";
+import { type AskInput, parseQuestionAnswers, sanitizeAskInput, toQuestionRequest } from "./question.ts";
 
 export interface ExtensionOptions {
   /** OpenSuperWhisper's agent registry directory (holds `app.pid` and `app.executable`). */
@@ -141,9 +141,10 @@ export function createExtension(overrides: Partial<ExtensionOptions> = {}): (pi:
     /** Runs the native `ask`, plus the panel when a guard doesn't rule it out. */
     async function answerAsk(params: Record<string, unknown>, signal: AbortSignal | undefined, ctx: OmpToolContext) {
       if (!ctx.invokeTool) throw new Error("omp offers no native `ask` to delegate to");
-      const input = params as unknown as AskInput;
+      // The panel must show and answer the text native shows; native gets the call unchanged.
+      const input = sanitizeAskInput(params as unknown as AskInput);
       const request =
-        options.platform === "darwin" && ctx.mode === "tui" && ctx.agent.kind === "main"
+        options.platform === "darwin" && ctx.mode === "tui" && ctx.agent.kind === "main" && !signal?.aborted
           ? toQuestionRequest(input, ctx.sessionManager.getSessionId(), ctx.cwd)
           : undefined;
       const executable = request && locateApp(options.agentsDir);

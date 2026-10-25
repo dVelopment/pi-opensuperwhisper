@@ -174,6 +174,27 @@ describe("panel answers first", () => {
     });
     expect(run?.env.CLAUDE_PROJECT_DIR).toBe("/Users/me/project");
   });
+
+  test("sees the labels and question without the `\\r` runs native strips, and answers with them", async () => {
+    const { app, host } = setup({ kind: "answer", answers: { "Which database?": "SQL ite" } });
+    const ask = await registeredAsk(host);
+    const native = new FakeNativeAsk();
+    const params = {
+      questions: [{ id: "d\rb", question: "Which\r\rdatabase?", options: [{ label: "Postgres" }, { label: "SQL\rite" }] }],
+    };
+
+    const result = await callAsk(ask, params, { native });
+
+    expect(JSON.parse(app.runs()[0]?.stdin ?? "").tool_input.questions).toEqual([
+      { question: "Which database?", options: [{ label: "Postgres" }, { label: "SQL ite" }], multiSelect: false },
+    ]);
+    expect(result).toEqual({
+      content: [{ type: "text", text: "User selected: SQL ite" }],
+      details: { question: "Which database?", options: ["Postgres", "SQL ite"], multi: false, selectedOptions: ["SQL ite"] },
+    });
+    // Native gets the call as the model made it; it sanitizes on its own.
+    expect(native.calls[0]?.params).toEqual(params);
+  });
 });
 
 /** What the native dialog returns when the user answers in the terminal. */
@@ -242,6 +263,7 @@ describe("guards fail open to the plain native ask", () => {
     ctx?: (native: FakeNativeAsk) => unknown;
     params?: Record<string, unknown>;
     prepare?: (app: FakeApp) => void;
+    signal?: AbortSignal;
   }
   const cases: [string, GuardCase][] = [
     ["off macOS", { platform: "linux" }],
@@ -255,8 +277,13 @@ describe("guards fail open to the plain native ask", () => {
       "when two questions share their text",
       { params: { questions: [database, { ...languages, question: "Which database?" }] } },
     ],
+    [
+      "when two questions share their text once `\\r` runs are stripped",
+      { params: { questions: [database, { ...languages, question: "Which\rdatabase?" }] } },
+    ],
+    ["when the call is already cancelled", { signal: AbortSignal.abort() }],
   ];
-  for (const [when, { platform, ctx, params = { questions: [database] }, prepare }] of cases) {
+  for (const [when, { platform, ctx, params = { questions: [database] }, prepare, signal = new AbortController().signal }] of cases) {
     test(when, async () => {
       // A panel that would answer at once: any spawn would win the race and change the result.
       const { app, host } = setup({ kind: "answer", answers: { "Which database?": "SQLite" } }, { platform });
@@ -265,7 +292,7 @@ describe("guards fail open to the plain native ask", () => {
       const native = new FakeNativeAsk();
       native.resolve(nativeResult);
 
-      const result = await callAsk(ask, params, { native, signal: new AbortController().signal, ctx: ctx?.(native) });
+      const result = await callAsk(ask, params, { native, signal, ctx: ctx?.(native) });
 
       expect(result).toBe(nativeResult);
       expect(native.calls).toEqual([{ params, signal: undefined }]);
