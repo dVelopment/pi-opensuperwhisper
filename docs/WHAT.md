@@ -108,9 +108,9 @@ oh-my-pi has a built-in `ask` tool (a structured option picker); pi core has non
 
 **Registration.** On `session_start`, on oh-my-pi only, when `pi.getAllTools()` lists `ask` with `sourceInfo.source === "builtin"`; once per extension instance. The definition reuses the built-in's `description` and `parameters`, so the model sees the same tool, and copies its traits (`tools/ask.ts`): `label: "Ask"`, `approval: "read"`, `strict: true`, `loadMode: "discoverable"` and `concurrency: "exclusive"` (the dialog is one shared UI surface).
 
-**Guards.** The panel joins only on macOS, in TUI mode, in the main agent (`ctx.agent.kind === "main"`), with the app alive, and when the call's question texts are distinct: the app keys answers by question text. Otherwise `ask` is a plain `ctx.invokeTool(params)`, exactly the native behavior. Without `ctx.invokeTool` (no native `ask` to delegate to) the call fails with an error.
+**Guards.** The panel joins only on macOS, in TUI mode, in the main agent (`ctx.agent.kind === "main"`), with the app alive, when the call isn't already cancelled (its signal aborted), and when the call's question texts are distinct: the app keys answers by question text. Otherwise `ask` is a plain `ctx.invokeTool(params)`, exactly the native behavior. Without `ctx.invokeTool` (no native `ask` to delegate to) the call fails with an error.
 
-**Request.** `questions[{id, question, header?, options[{label, description?, preview?}], multi?, recommended?}]` maps to the stdin of `agent-hook question`, with `CLAUDE_PROJECT_DIR` set as for the Stop hook:
+**Request.** `questions[{id, question, header?, options[{label, description?, preview?}], multi?, recommended?}]` maps to the stdin of `agent-hook question`, with `CLAUDE_PROJECT_DIR` set as for the Stop hook. Like native `ask` (`sanitizeAskParams` in `tools/ask.ts`), the extension first replaces the `\r` runs models sometimes inject, so the panel shows, and its answer matches, the text native would; native itself gets the call unchanged:
 
 ```json
 {"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"…","header":"…","options":[{"label":"…","description":"…"}],"multiSelect":false}]},"session_id":"…","cwd":"…"}

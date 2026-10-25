@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { runHook } from "../src/hook.ts";
+import type { QuestionRequest } from "../src/question.ts";
 import { FakeApp, type HookBehavior, questionAnswerStdout } from "./harness.ts";
 
 const apps: FakeApp[] = [];
@@ -14,7 +15,7 @@ function fakeApp(behavior: HookBehavior): FakeApp {
   return app;
 }
 
-const questionRequest = {
+const questionRequest: QuestionRequest = {
   hook_event_name: "PreToolUse",
   tool_name: "AskUserQuestion",
   tool_input: {
@@ -50,5 +51,11 @@ describe("runHook", () => {
     app.release();
 
     expect(await hook.stdout).toBe(questionAnswerStdout({ "Which database?": "Postgres" }));
+  });
+
+  test("only accepts the request its event reads (checked by tsc)", () => {
+    // @ts-expect-error `agent-hook stop` reads a Stop payload, not a question request.
+    const mismatched = () => runHook("agent-hook", "stop", questionRequest);
+    expect(mismatched).toBeFunction();
   });
 });
