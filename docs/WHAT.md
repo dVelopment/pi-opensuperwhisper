@@ -152,7 +152,7 @@ The exact `agentEnabledKinds` default wasn't found in upstream source. The smoke
 | Subagents | none in core | `ctx.agent.kind === "sub"`, skipped |
 | User dir | `~/.pi` | `~/.omp` |
 | Manifest key | `pi.extensions` | `omp.extensions` (falls back to `pi.extensions`) |
-| Install | `pi install npm:@chitinai/pi-opensuperwhisper` | `omp plugin install @chitinai/pi-opensuperwhisper` |
+| Install | `pi install npm:@stibbons/pi-opensuperwhisper` | `omp plugin install @stibbons/pi-opensuperwhisper` |
 
 - Subscribe to both triggers. Each host's handler ignores the other host's `ctx`.
 - Use only `node:child_process`, `node:fs`, `node:os` and `node:path`, which work under Node and Bun.

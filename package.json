@@ -1,5 +1,5 @@
 {
-  "name": "@chitinai/pi-opensuperwhisper",
+  "name": "@stibbons/pi-opensuperwhisper",
   "version": "0.1.0",
   "description": "Answer pi and oh-my-pi agents from the OpenSuperWhisper panel on macOS",
   "license": "MIT",
