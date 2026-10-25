@@ -102,7 +102,7 @@ env: inherit `process.env` and set `CLAUDE_PROJECT_DIR=<cwd>`. See "Agent detect
 
 ### Phase 2: questions (oh-my-pi `ask` tool)
 
-oh-my-pi has a built-in `ask` tool (a structured option picker); pi core has none, so this is oh-my-pi only. Paths below are in oh-my-pi 18.12.6 `packages/coding-agent/src/`.
+oh-my-pi has a built-in `ask` tool (a structured option picker); pi core has none, so this is oh-my-pi only. On pi, the README recommends a question plugin such as `@mazli/pi-ask-user-question`, answered in the terminal: pi has no `ctx.invokeTool`, so an extension can't race another extension's tool against the panel. Paths below are in oh-my-pi 18.12.6 `packages/coding-agent/src/`.
 
 **Shadow the built-in.** A `tool_call` handler can only block a call or revise its input (`extensibility/extensions/wrapper.ts`), and `tool_result` runs after the native tool has finished, so neither can answer `ask` from the panel or close the terminal dialog. Instead the extension re-registers `ask` and delegates to the native built-in with `ctx.invokeTool(params, { signal })` (`extensibility/extensions/types.ts`). Its own `AbortController` on that signal lets a panel answer close the terminal dialog.
 
