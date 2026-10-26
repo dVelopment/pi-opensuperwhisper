@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues live in GitHub Issues on `dVelopment/pi-opensuperwhisper` (via `gh`). See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues on `stibbons-ai/pi-opensuperwhisper` (via `gh`). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

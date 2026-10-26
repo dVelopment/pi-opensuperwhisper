@@ -6,7 +6,7 @@ A pi extension (also loadable in oh-my-pi) that hands the agent's last message t
 > - pi: `packages/coding-agent/docs/extensions.md` in [badlogic/pi-mono](https://github.com/badlogic/pi-mono)
 > - oh-my-pi: [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi), `packages/coding-agent/src/extensibility/extensions/types.ts`
 >
-> The full spec is GitHub issue [#1](https://github.com/dVelopment/pi-opensuperwhisper/issues/1).
+> The full spec is GitHub issue [#1](https://github.com/stibbons-ai/pi-opensuperwhisper/issues/1).
 
 ## Reference: how the Claude Code plugin works upstream
 

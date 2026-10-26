@@ -6,7 +6,7 @@
   "author": "Daniel Holzmann <daniel@danielholzmann.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dVelopment/pi-opensuperwhisper.git"
+    "url": "git+https://github.com/stibbons-ai/pi-opensuperwhisper.git"
   },
   "publishConfig": {
     "access": "public"
