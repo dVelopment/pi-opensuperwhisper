@@ -1,6 +1,6 @@
 {
   "name": "@stibbons/pi-opensuperwhisper",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Answer pi and oh-my-pi agents from the OpenSuperWhisper panel on macOS",
   "license": "MIT",
   "author": "Daniel Holzmann <daniel@danielholzmann.com>",
