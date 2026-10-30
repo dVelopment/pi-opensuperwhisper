@@ -2,7 +2,7 @@
 
 Answer [pi](https://github.com/badlogic/pi-mono) and [oh-my-pi](https://github.com/can1357/oh-my-pi) agents from the [OpenSuperWhisper](https://github.com/my-monkeys/OpenSuperWhisper) panel on macOS.
 
-When a run is finished and waiting for you, OpenSuperWhisper's Agents panel opens with the agent's last message. Dictate (or type) your reply there. It shows up in the session as a normal user message and starts the next run. You don't have to go back to the terminal.
+When a run is finished and waiting for you, OpenSuperWhisper's Agents panel opens with the agent's last message. Dictate (or type) your reply there. It shows up in the session as a normal user message and starts the next run. You don't have to go back to the terminal. On oh-my-pi, questions the agent asks with its `ask` tool open in the panel too.
 
 ## Install
 
@@ -32,12 +32,18 @@ There's nothing to configure. Turn the panel on or off in OpenSuperWhisper's own
 - **Your reply** is sent as the next user message, without the panel's "The user answered by voice…" prefix.
 - **"Let it stop", or the panel timing out,** leaves the agent idle with no side effects.
 - **The terminal always wins.** Typing in the terminal, starting a new run, switching or resuming sessions, or quitting cancels the panel request. Exactly one run happens, even if a panel reply arrives at the same moment.
+- **oh-my-pi `ask` questions** open in the panel and in the terminal dialog at the same time. Whichever you answer first wins: a panel answer closes the terminal dialog and reaches the agent exactly as if you had picked it there (single choice, multi-select or free text); answering in the terminal closes the panel. Dismissing the panel, or letting it time out, leaves the terminal dialog open. Questions from subagents, and calls with two identical question texts, stay terminal-only.
+- **pi has no `ask` tool.** For structured questions on pi, install a question plugin such as [`@mazli/pi-ask-user-question`](https://www.npmjs.com/package/@mazli/pi-ask-user-question) (`pi install npm:@mazli/pi-ask-user-question`). Its questions are answered in the terminal and don't open in the panel: pi gives extensions no `ctx.invokeTool`, so this extension can't run another extension's question tool and the panel side by side.
 - **Fails open.** If OpenSuperWhisper isn't running, its files are missing or stale, or anything goes wrong, the extension does nothing and logs nothing. It never blocks the agent or the terminal.
 - **No network.** The extension only talks to the local OpenSuperWhisper app.
 
 ## How it works
 
 The extension uses OpenSuperWhisper's own Claude Code integration path. It finds the running app through `~/Library/Application Support/fr.my-monkey.opensuperwhisper/agents/` (`app.pid`, `app.executable`), then runs `<app> agent-hook stop` with a Claude Code–style Stop request on stdin and `CLAUDE_PROJECT_DIR` set. If you answer, the app prints the reply on stdout. Cancelling a request kills that process, and the app closes the panel within about a second.
+
+For oh-my-pi's `ask` tool, the extension registers its own `ask` (same description and parameters) when a session starts. Each call runs the native `ask` through `ctx.invokeTool` and, at the same time, `<app> agent-hook question` with the questions as a Claude Code `AskUserQuestion` request. The first answer wins and the other side is cancelled.
+
+**Known cost:** because the extension replaces the built-in `ask`, oh-my-pi shows `ask` calls in the transcript like any other extension tool instead of with its built-in renderer. The interactive question dialog is unchanged.
 
 ## Development
 

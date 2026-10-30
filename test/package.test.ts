@@ -17,7 +17,7 @@ describe("package manifest", () => {
     // Registration only: no events are fired, so the real app is never contacted.
     entry.default(host.api);
     expect(host.events().sort()).toEqual(
-      ["agent_end", "agent_settled", "agent_start", "input", "session_before_switch", "session_shutdown"].sort(),
+      ["agent_end", "agent_settled", "agent_start", "input", "session_before_switch", "session_shutdown", "session_start"].sort(),
     );
   });
 });

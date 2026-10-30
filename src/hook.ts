@@ -1,4 +1,11 @@
 import { spawn } from "node:child_process";
+import type { QuestionRequest } from "./question.ts";
+
+/** The `agent-hook` subcommands this extension runs, each with the request it reads on stdin. */
+interface HookRequests {
+  stop: StopRequest;
+  question: QuestionRequest;
+}
 
 /** The Claude Code–style Stop payload `agent-hook stop` reads from stdin. */
 export interface StopRequest {
@@ -9,7 +16,7 @@ export interface StopRequest {
   stop_hook_active: false;
 }
 
-export interface StopHook {
+export interface HookProcess {
   /** Resolves with the hook's stdout when it exits 0, or nothing on any failure. */
   readonly stdout: Promise<string | undefined>;
   /** Stops the hook (SIGTERM). Safe to call after it has exited. */
@@ -17,12 +24,12 @@ export interface StopHook {
 }
 
 /**
- * Spawns `<executable> agent-hook stop` without blocking, writes the Stop request to its stdin
- * and collects its stdout. `CLAUDE_PROJECT_DIR` makes the app accept the request as Claude Code.
+ * Spawns `<executable> agent-hook <event>` without blocking, writes the request as JSON to its
+ * stdin and collects its stdout. `CLAUDE_PROJECT_DIR` makes the app accept the request as Claude Code.
  */
-export function runStopHook(executable: string, request: StopRequest): StopHook {
+export function runHook<E extends keyof HookRequests>(executable: string, event: E, request: HookRequests[E]): HookProcess {
   const { promise, resolve } = Promise.withResolvers<string | undefined>();
-  const child = spawn(executable, ["agent-hook", "stop"], {
+  const child = spawn(executable, ["agent-hook", event], {
     env: { ...process.env, CLAUDE_PROJECT_DIR: request.cwd },
     stdio: ["pipe", "pipe", "ignore"],
   });
